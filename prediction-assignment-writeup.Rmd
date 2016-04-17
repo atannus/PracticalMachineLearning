@@ -1,0 +1,147 @@
+---
+title: "Prediction Assignment Writeup"
+subtitle: "Human Acticity Detection"
+author: "André Tannús"
+date: "April 4, 2016"
+output: html_document
+---
+
+## Abstract
+
+The objective is to predict the manner in which subjects performed a certain physical activity. Data was collected from accellerometers on six subjects performing the activity in five different ways (classes A through E). The accellerometers were placed on subject's arm, forearm, belt and dumbell.
+
+## Environment
+
+Load the necessary libraries and clean up any the environment variables. 
+
+```{r Setting up the environment, results='hide', message = FALSE}
+library(caret);
+library(randomForest);
+library(ggplot2);
+rm(list=ls())
+```
+
+## Data Preprocessing
+
+
+Load the raw training and testing data into R.
+
+```{R Loading raw data}
+pml.training <- read.csv("data/pml-training.csv")
+pml.testing  <- read.csv("data/pml-testing.csv")
+dim(pml.training)
+```
+
+The data contains a total of 160 features, but we will only need a small subset of them, namely those related to the accelerometers and the `classe` feature, which indicates how the activity was performed with the following possible values:
+
+* A : Exactly according to the specification.
+* B : Throwing the elbows to the front.
+* C : Lifting the dumbbell only halfway.
+* D : Lowering the dumbbell only halfway.
+* E : Throwing the hips to the front.
+
+The raw timestamp features together measure the absolute im microsecodns. It was very tempting to use time data in this prediction but it was quickly realized that all subjects performed the activities in order, one after the other. This curious fact confers the data perfect separation between classes throought time. Even if time was made relative to each subject's performing of a certain class, the testing set contains no reference to the moment at which each test observation was started at, so it would be impossible to predict on that test set. Nonetheless, the out-of-bag error obtained with normalized time by a Random Forest predictor was around 1.5% against 5.5% when not using time features. Also, and as expected, Random Forest with both raw time variables and no normalization produces an absurd out-of-bag error of 0.01%, which is due to the perfect separation mentioned before.
+
+So for this project we will only use the accelerometer data, discarding all other variables including the derived oyler angles.
+
+```{R Subsetting data}
+# Subset all feature names containing the string "accell".
+sub.training <- pml.training[,substr(names(pml.training), 0, 5)=="accel"]
+sub.testing  <- pml.testing [,substr(names(pml.testing), 0, 5)=="accel"]
+feature.names <- names(sub.training)
+
+# Create a new data frame with the features we will use.
+df.train <- data.frame(
+  classe        = pml.training$classe,
+  sub.training
+)
+df.test <- data.frame(
+  problem_id        = pml.testing$problem_id,
+  sub.testing
+)
+```
+
+The result is a clean training set consisting of just under 20k observations of 13 variables. Two adicional data frames were created to hold one extra piece of information, `time`, which will be used in an attempt to to improve the results. We can now remove the temporary variables and leave only the training and testing sets. 
+
+```{r}
+rm(list=c("pml.training", "pml.testing", "sub.training", "sub.testing"))
+dim(df.train)
+```
+
+## Model: Random Forest
+
+We can now fit a classifier model to the training data. The choice of classifier is Random Forest. There is no need for a cross-validation set with Random Forests since the algorithm produces a similar metric, the out-of-bag error, which captures the mean prediction error on each obversation using only the trees that did not have that observation in their bootstrap sample.
+
+```{r Train Random Forest, cache=TRUE}
+# Fit a Random Forest.
+modelFit <- randomForest(classe ~ ., data=df.train, type="class")
+modelFit
+```
+
+
+## Model accuracy:
+
+The model has reasonable accuracy and an expected out of sample error given by the Random Forest's out-of-bag error, of 4.3%. We can now use the model to make predictions on the test set.
+
+## Predictions using the test set.
+```{r Predict with Random Forest}
+predRF <- predict(modelFit, newdata=df.test)
+predRF
+```
+
+## Model: Binary classifier ensemble
+
+Another strategy was to prepare 5 different data sets, one for each class, such that each observation was either of a certain class or not. Random forests were fit to each of them and used to predict the actitivies.
+
+```{r train binary classifier ensemble, cache=TRUE}
+# Transform the data frame such that the class passed in 'letter' is '1' and '0' otherwise.
+prepare <- function(df, letter) {
+  df$classe <- as.character(df$classe)
+  df[as.character(df$classe)!=letter,]$classe <- 0
+  df[as.character(df$classe)==letter,]$classe <- 1
+  df$classe <- as.factor(df$classe)
+  df
+}
+
+# Prepare and fit a training set for each class.
+trainA <- prepare(df.train, "A")
+trainB <- prepare(df.train, "B")
+trainC <- prepare(df.train, "C")
+trainD <- prepare(df.train, "D")
+trainE <- prepare(df.train, "E")
+modelFitA <- randomForest(classe ~ ., data=trainA, type="class")
+modelFitB <- randomForest(classe ~ ., data=trainB, type="class")
+modelFitC <- randomForest(classe ~ ., data=trainC, type="class")
+modelFitD <- randomForest(classe ~ ., data=trainD, type="class")
+modelFitE <- randomForest(classe ~ ., data=trainE, type="class")
+
+# Predict with multiple binary classifiers.
+predTestA <- as.character(predict(modelFitA, newdata=df.test))
+predTestB <- as.character(predict(modelFitB, newdata=df.test))
+predTestC <- as.character(predict(modelFitC, newdata=df.test))
+predTestD <- as.character(predict(modelFitD, newdata=df.test))
+predTestE <- as.character(predict(modelFitE, newdata=df.test))
+predTestA[predTestA==1] <- "A"
+predTestB[predTestB==1] <- "B"
+predTestC[predTestC==1] <- "C"
+predTestD[predTestD==1] <- "D"
+predTestE[predTestE==1] <- "E"
+prediction <- data.frame(rbind(predTestA, predTestB, predTestC, predTestD, predTestE))
+
+# Summarize all the multible binary classifiers.
+binaryPred <- c()
+for( x in prediction) {
+  x <- as.character(x)
+  x[x==0] <- ""
+  temp <- paste(x, sep="", collapse = "")
+  binaryPred <- c(binaryPred, temp)
+}
+binaryPred
+```
+
+Notice this method is unable to predict the classes of the first and third test samples.
+
+## Conslusion
+
+The chosen Random Forest classifier was sucessfull at predicting how each the activities were performed when given a single observation of only the raw, unprocessed accelerometer data producing 18/20 correct results.
+
